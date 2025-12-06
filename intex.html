@@ -1,0 +1,450 @@
+import React, { useState, useRef, useEffect } from "react";
+
+// Single-file React component implementing the features requested in the notebook:
+// - Image upload & preview (client-side)
+// - Editable text area with bold/highlight and copy features
+// - Speech-to-text (Web Speech API) and text-to-speech (SpeechSynthesis)
+// - API Key settings in a settings sidebar (localStorage) with model selection
+// - Debug / error-catch logging panel and a simple fallback method
+// - All code contained in one file, using Tailwind classes for styling
+
+export default function AIModelFrontend() {
+  // Text state
+  const [text, setText] = useState(
+    "Write your prompt here...\nYou can highlight, bold, edit, copy, and speak this text."
+  );
+
+  // Formatting -- we will use lightweight inline markup for highlight and bold
+  // e.g. **bold** and ==highlight== (rendered in preview)
+  const [htmlPreview, setHtmlPreview] = useState("");
+
+  // Image upload
+  const [images, setImages] = useState([]); // {name, url, file}
+  const fileInputRef = useRef(null);
+
+  // Speech recognition (STT)
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef(null);
+
+  // Debug / logs
+  const [logs, setLogs] = useState([]);
+
+  // Settings / API key
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("ai_api_key") || "");
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("ai_model") || "gemini-lite");
+  const [tokenLimit, setTokenLimit] = useState(() => localStorage.getItem("ai_token_limit") || "2048");
+
+  // Fallback example: if API call fails, fall back to local echo generator
+  const fallbackGenerate = async (prompt) => {
+    log("Using fallback generator (local).\nPrompt: " + prompt);
+    // Very simple local fallback (not a real model): reverses prompt + timestamp
+    return `FALLBACK:\n${prompt.split("").reverse().join("")}\n-- fallback at ${new Date().toLocaleString()}`;
+  };
+
+  // Utility to add logs (debugging)
+  const log = (msg) => {
+    setLogs((s) => [{ id: Date.now(), time: new Date().toLocaleTimeString(), msg }, ...s].slice(0, 200));
+    console.debug(msg);
+  };
+
+  // Convert lightweight markup in `text` to HTML for preview
+  useEffect(() => {
+    // simple parser: **bold** -> <strong>, ==highlight== -> <mark>, newlines -> <br>
+    try {
+      let out = text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+        .replace(/==(.+?)==/g, "<mark>$1</mark>")
+        .replace(/\n/g, "<br />");
+      setHtmlPreview(out);
+    } catch (e) {
+      log("Preview parse error: " + e.message);
+      setHtmlPreview("<em>Preview error</em>");
+    }
+  }, [text]);
+
+  // Image upload handler
+  const onFiles = (files) => {
+    try {
+      const arr = Array.from(files).map((file) => ({
+        name: file.name,
+        url: URL.createObjectURL(file),
+        file,
+      }));
+      setImages((s) => [...arr, ...s]);
+      log(`Uploaded ${arr.length} file(s)`);
+    } catch (e) {
+      log("Image upload error: " + e.message);
+    }
+  };
+
+  // Copy text to clipboard
+  const copyText = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      log("Text copied to clipboard");
+      alert("Copied to clipboard");
+    } catch (e) {
+      log("Copy failed: " + e.message);
+      alert("Copy failed — see debug log.");
+    }
+  };
+
+  // Simple toggle bold around selected text
+  const applyMarkup = (markerStart, markerEnd) => {
+    try {
+      const el = document.getElementById("editor");
+      if (!el) return;
+      const start = el.selectionStart;
+      const end = el.selectionEnd;
+      if (start === end) {
+        // no selection — append markers and place caret between
+        const newText = text.slice(0, end) + markerStart + markerEnd + text.slice(end);
+        setText(newText);
+        // set caret not available reliably without refs — keep simple
+      } else {
+        const selected = text.slice(start, end);
+        const newText = text.slice(0, start) + markerStart + selected + markerEnd + text.slice(end);
+        setText(newText);
+      }
+      log(`Applied markup ${markerStart}${markerEnd}`);
+    } catch (e) {
+      log("Apply markup error: " + e.message);
+    }
+  };
+
+  // Text-to-speech
+  const speakText = (t = text) => {
+    try {
+      if (!window.speechSynthesis) throw new Error("No speechSynthesis in this browser");
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(t);
+      u.rate = 1;
+      u.pitch = 1;
+      window.speechSynthesis.speak(u);
+      log("Speaking text...");
+    } catch (e) {
+      log("TTS error: " + e.message);
+      alert("Text-to-speech failed: " + e.message);
+    }
+  };
+
+  // Speech-to-text (simple using webkitSpeechRecognition / SpeechRecognition)
+  const toggleListening = () => {
+    if (!("webkitSpeechRecognition" in window || "SpeechRecognition" in window)) {
+      alert("Speech recognition not supported in this browser");
+      return;
+    }
+
+    if (!recognitionRef.current) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const r = new SpeechRecognition();
+      r.lang = "en-US";
+      r.interimResults = true;
+      r.continuous = true;
+
+      r.onresult = (ev) => {
+        let interim = "";
+        let final = "";
+        for (let i = ev.resultIndex; i < ev.results.length; ++i) {
+          const res = ev.results[i];
+          if (res.isFinal) final += res[0].transcript + " ";
+          else interim += res[0].transcript + " ";
+        }
+        // Append final to text
+        if (final.trim()) {
+          setText((t) => t + "\n" + final.trim());
+          log("STT final: " + final.trim());
+        }
+      };
+
+      r.onerror = (ev) => {
+        log("STT error: " + JSON.stringify(ev));
+        setListening(false);
+      };
+
+      recognitionRef.current = r;
+    }
+
+    if (!listening) {
+      try {
+        recognitionRef.current.start();
+        setListening(true);
+        log("Listening started");
+      } catch (e) {
+        log("Start listening error: " + e.message);
+      }
+    } else {
+      recognitionRef.current.stop();
+      setListening(false);
+      log("Listening stopped");
+    }
+  };
+
+  // Save settings
+  const saveSettings = () => {
+    localStorage.setItem("ai_api_key", apiKey);
+    localStorage.setItem("ai_model", selectedModel);
+    localStorage.setItem("ai_token_limit", tokenLimit);
+    log("Settings saved");
+    setSettingsOpen(false);
+  };
+
+  // Simulated API call with error catching and fallback
+  const callApiGenerate = async (prompt) => {
+    log("Calling API with model=" + selectedModel + " prompt length=" + prompt.length);
+    try {
+      // Dummy example: throw when apiKey empty to simulate error
+      if (!apiKey.trim()) throw new Error("API key missing (simulated)");
+
+      // In a real app: call your backend that uses the API key safely.
+      // Example (DO NOT PUT SECRET KEYS IN CLIENT):
+      // const res = await fetch('/api/generate', { method: 'POST', body: JSON.stringify({ prompt, model: selectedModel }) });
+      // const data = await res.json();
+
+      // Simulate success response
+      const data = { text: `MODEL(${selectedModel}) RESPONSE:\nEcho: ${prompt.slice(0, 200)}` };
+      log("API success (simulated)");
+      return data.text;
+    } catch (e) {
+      log("API error: " + e.message);
+      // fallback
+      const fb = await fallbackGenerate(prompt);
+      return fb;
+    }
+  };
+
+  // Handler to generate a response from API or fallback and append to text
+  const generateAndAppend = async () => {
+    const prompt = text;
+    try {
+      const out = await callApiGenerate(prompt);
+      setText((t) => t + "\n\n" + out);
+      log("Appended generated response");
+    } catch (e) {
+      log("Generate and append failed: " + e.message);
+    }
+  };
+
+  // Clear logs
+  const clearLogs = () => setLogs([]);
+
+  // Simple UI
+  return (
+    <div className="min-h-screen bg-gray-50 p-4 text-gray-800">
+      {/* Settings gear in top-left */}
+      <div className="fixed top-4 left-4 z-40">
+        <button
+          onClick={() => setSettingsOpen((s) => !s)}
+          className="p-2 rounded-xl shadow bg-white hover:scale-105 transition-transform"
+          title="Settings"
+        >
+          ⚙️
+        </button>
+      </div>
+
+      {/* Settings Sidebar */}
+      {settingsOpen && (
+        <div className="fixed top-16 left-4 w-80 z-50 bg-white p-4 rounded-2xl shadow-lg">
+          <h3 className="font-semibold">AI Settings</h3>
+          <label className="block mt-3 text-sm">API Key (stored locally)</label>
+          <input
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            className="w-full p-2 mt-1 rounded border"
+            placeholder="pk_..."
+          />
+
+          <label className="block mt-3 text-sm">Select Model</label>
+          <select
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            className="w-full p-2 mt-1 rounded border"
+          >
+            <option value="gemini-lite">Gemini Lite</option>
+            <option value="gemini-standard">Gemini Standard</option>
+            <option value="gpt-4o">GPT-4o</option>
+            <option value="local-fallback">Local Fallback</option>
+          </select>
+
+          <label className="block mt-3 text-sm">Token Limit</label>
+          <input
+            value={tokenLimit}
+            onChange={(e) => setTokenLimit(e.target.value)}
+            className="w-full p-2 mt-1 rounded border"
+          />
+
+          <div className="flex gap-2 mt-4">
+            <button onClick={saveSettings} className="px-3 py-2 rounded bg-blue-600 text-white">
+              Save
+            </button>
+            <button onClick={() => setSettingsOpen(false)} className="px-3 py-2 rounded border">
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="max-w-6xl mx-auto grid md:grid-cols-3 gap-6">
+        {/* Left column: editor & toolbar */}
+        <div className="md:col-span-2 bg-white p-4 rounded-2xl shadow">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-semibold">AI Model Editor</h2>
+            <div className="flex gap-2 items-center">
+              <button
+                onClick={() => applyMarkup("**", "**")}
+                className="px-2 py-1 border rounded"
+                title="Bold selected"
+              >
+                <b>B</b>
+              </button>
+              <button
+                onClick={() => applyMarkup("==", "==")}
+                className="px-2 py-1 border rounded"
+                title="Highlight selected"
+              >
+                ✨
+              </button>
+              <button onClick={copyText} className="px-2 py-1 border rounded" title="Copy text">
+                Copy
+              </button>
+              <button
+                onClick={() => speakText()}
+                className={`px-2 py-1 border rounded ${listening ? "bg-yellow-100" : ""}`}
+                title="Text to speech"
+              >
+                🔊
+              </button>
+              <button onClick={toggleListening} className="px-2 py-1 border rounded" title="Speech-to-text">
+                {listening ? "Stop STT" : "Start STT"}
+              </button>
+            </div>
+          </div>
+
+          <textarea
+            id="editor"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            className="w-full min-h-[220px] p-3 rounded-lg border resize-y"
+          />
+
+          <div className="flex gap-2 mt-3">
+            <button onClick={generateAndAppend} className="px-3 py-2 rounded bg-green-600 text-white">
+              Generate (API / Fallback)
+            </button>
+            <button
+              onClick={() => {
+                setText("");
+                log("Text cleared");
+              }}
+              className="px-3 py-2 rounded border"
+            >
+              Clear
+            </button>
+            <label className="px-3 py-2 rounded border cursor-pointer">
+              Upload Image
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(e) => onFiles(e.target.files)}
+                className="hidden"
+              />
+            </label>
+          </div>
+
+          <div className="mt-4">
+            <h3 className="font-semibold">Preview</h3>
+            <div className="mt-2 p-3 rounded border min-h-[120px] bg-gray-50" dangerouslySetInnerHTML={{ __html: htmlPreview }} />
+          </div>
+
+          <div className="mt-4">
+            <h3 className="font-semibold">Images</h3>
+            <div className="mt-2 grid grid-cols-3 gap-3">
+              {images.map((im) => (
+                <div key={im.url} className="border rounded p-1 bg-white">
+                  <img src={im.url} alt={im.name} className="w-full h-28 object-cover rounded" />
+                  <div className="text-xs mt-1 flex justify-between items-center">
+                    <span className="truncate">{im.name}</span>
+                    <button
+                      onClick={() => {
+                        // revoke and remove
+                        URL.revokeObjectURL(im.url);
+                        setImages((s) => s.filter((x) => x.url !== im.url));
+                        log("Removed image " + im.name);
+                      }}
+                      className="ml-2 text-red-500"
+                    >
+                      x
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Right column: logs + quick actions */}
+        <div className="bg-white p-4 rounded-2xl shadow flex flex-col gap-4">
+          <div>
+            <h3 className="font-semibold">Quick actions</h3>
+            <div className="flex gap-2 mt-2">
+              <button
+                onClick={() => {
+                  navigator.clipboard
+                    .writeText(htmlPreview)
+                    .then(() => alert("Preview HTML copied"))
+                    .catch((e) => alert("Copy failed"));
+                }}
+                className="px-2 py-1 rounded border"
+              >
+                Copy Preview HTML
+              </button>
+
+              <button
+                onClick={() => {
+                  const blob = new Blob([text], { type: "text/plain" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = "prompt.txt";
+                  a.click();
+                  URL.revokeObjectURL(url);
+                  log("Downloaded prompt.txt");
+                }}
+                className="px-2 py-1 rounded border"
+              >
+                Download .txt
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <h3 className="font-semibold">Debug / Logs</h3>
+            <div className="mt-2 h-56 overflow-auto border rounded p-2 bg-black text-white text-xs">
+              <button onClick={clearLogs} className="text-sm underline mb-2">
+                Clear Logs
+              </button>
+              <div className="flex flex-col-reverse">
+                {logs.map((l) => (
+                  <div key={l.id} className="mb-1">
+                    <strong className="text-yellow-300">[{l.time}]</strong> {l.msg}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <h3 className="font-semibold">About / Safety</h3>
+            <p className="text-sm mt-2">This frontend stores API keys only in your browser (localStorage). For production, always use a secure server-side proxy to keep keys secret.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
